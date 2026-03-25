@@ -476,12 +476,42 @@ class VideoDownloader:
         }
         duration = float(info.get('duration') or 0)
         audio_size = self._estimate_best_audio_size(info.get('formats', []), duration)
+        
+        # 标准画质对应的高度范围
+        quality_ranges = {
+            '4K': (2160, 9999),
+            '2K': (1440, 2159),
+            '1080p': (1080, 1439),
+            '720p': (720, 1079),
+            '480p': (480, 719),
+            '360p': (360, 479)
+        }
+        
+        # 初始化质量桶
+        for label in quality_labels.values():
+            quality_buckets[label] = {
+                'quality': label,
+                'height': '0',
+                'size': '未知',
+                'size_bytes': '0'
+            }
+        
+        # 处理所有格式
         for fmt in info.get('formats', []):
             height = int(float(fmt.get('height', 0) or 0))
             if not height:
                 continue
-            quality_str = str(height)
-            label = quality_labels.get(quality_str, f"{height:d}p")
+            
+            # 找到对应的质量标签
+            current_label = None
+            for label, (min_h, max_h) in quality_ranges.items():
+                if min_h <= height <= max_h:
+                    current_label = label
+                    break
+            
+            if not current_label:
+                continue
+            
             video_size = self._estimate_format_size(fmt, duration)
             if fmt.get('acodec') == 'none':
                 if video_size > 0:
@@ -490,32 +520,34 @@ class VideoDownloader:
                     total_size = self._estimate_profile_size(height, duration)
             else:
                 total_size = video_size if video_size > 0 else self._estimate_profile_size(height, duration)
-            existing = quality_buckets.get(label)
+            
+            existing = quality_buckets.get(current_label)
             if not existing or int(existing['size_bytes']) < total_size:
-                quality_buckets[label] = {
-                    'quality': label,
+                quality_buckets[current_label] = {
+                    'quality': current_label,
                     'height': str(height),
                     'size': self._format_filesize(total_size) if total_size > 0 else '未知',
                     'size_bytes': str(total_size)
                 }
-        def get_quality_order(fmt):
-            label = fmt['quality']
-            for i, q in enumerate(quality_labels.values()):
-                if q == label:
-                    return i
-            return len(quality_labels)
-        formats = list(quality_buckets.values())
-        formats.sort(key=get_quality_order)
-        if not formats:
-            formats = [
+        
+        # 过滤出有实际数据的格式
+        valid_formats = []
+        for label in ['4K', '2K', '1080p', '720p', '480p', '360p']:
+            fmt = quality_buckets.get(label)
+            if fmt and int(fmt['size_bytes']) > 0:
+                valid_formats.append(fmt)
+        
+        # 如果没有格式，使用默认值
+        if not valid_formats:
+            valid_formats = [
                 {'quality': '1080p', 'size': '500MB'},
                 {'quality': '720p', 'size': '250MB'},
                 {'quality': '480p', 'size': '100MB'},
             ]
         else:
-            formats = [{'quality': f['quality'], 'height': f['height'], 'size': f['size']} for f in formats]
+            valid_formats = [{'quality': f['quality'], 'height': f['height'], 'size': f['size']} for f in valid_formats]
 
-        return formats
+        return valid_formats
 
     def _estimate_best_audio_size(self, formats: List[Dict[str, Any]], duration: float) -> int:
         best = 0
@@ -611,7 +643,7 @@ class VideoDownloader:
                         }],
                     })
                 else:
-                    # 根据质量选择格式
+                    # 根据质量选择格式（使用ffmpeg合并最佳视频和音频）
                     if quality == '4K':
                         ydl_opts['format'] = 'bestvideo[height<=2160]+bestaudio/best[height<=2160]'
                     elif quality == '2K':
@@ -622,8 +654,15 @@ class VideoDownloader:
                         ydl_opts['format'] = 'bestvideo[height<=720]+bestaudio/best[height<=720]'
                     elif quality == '480p':
                         ydl_opts['format'] = 'bestvideo[height<=480]+bestaudio/best[height<=480]'
+                    elif quality == '360p':
+                        ydl_opts['format'] = 'bestvideo[height<=360]+bestaudio/best[height<=360]'
                     else:
-                        ydl_opts['format'] = 'bestvideo+bestaudio/best'
+                        # 处理其他可能的画质格式，如数字格式
+                        try:
+                            height = int(quality.replace('p', ''))
+                            ydl_opts['format'] = f'bestvideo[height<={height}]+bestaudio/best[height<={height}]'
+                        except:
+                            ydl_opts['format'] = 'bestvideo+bestaudio/best'
 
                 # 下载字幕
                 if download_subtitle:
